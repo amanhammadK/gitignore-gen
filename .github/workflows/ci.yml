@@ -1,39 +1,80 @@
-name: CI
+name: Node.js CI/CD
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+  workflow_call:
+    inputs:
+      node-version:
+        type: string
+        default: "20.x"
+        required: false
+        description: "Node.js version to use"
+      test-script:
+        type: string
+        default: "test"
+        required: false
+        description: "Package.json test script to run"
 
 jobs:
-  test:
+  test-lint:
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v3
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install requests
+      - name: Install Dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
 
-    - name: Test --list
-      run: python gitignore-gen.py --list
+      - name: Validate nxm.yaml
+        run: |
+          python -c "
+          import json, yaml, sys, os
+          from jsonschema import validate
+          try:
+              if not os.path.exists('nxm.yaml'):
+                  raise FileNotFoundError('nxm.yaml not found')
+              with open('nxm.yaml') as f:
+                  data = yaml.safe_load(f)
+              schema_url = 'https://raw.githubusercontent.com/nxm/nxm-ci-templates/main/schemas/nxm.schema.json'
+              schema_paths = ['schemas/nxm.schema.json', 'nxm-ci-templates/schemas/nxm.schema.json']
+              schema = None
+              for path in schema_paths:
+                  if os.path.exists(path):
+                      with open(path) as sf:
+                          schema = json.load(sf)
+                      break
+              if schema is None:
+                  import urllib.request
+                  try:
+                      with urllib.request.urlopen(schema_url, timeout=5) as response:
+                          schema = json.loads(response.read().decode())
+                  except Exception as url_err:
+                      raise FileNotFoundError(f'Schema file not found locally at paths {schema_paths} and failed to download from {schema_url}: {url_err}')
+              validate(instance=data, schema=schema)
+              print('nxm.yaml is valid.')
+          except Exception as e:
+              print(f'Validation failed: {e}')
+              sys.exit(1)
+          "
 
-    - name: Test fetch Python
-      run: python gitignore-gen.py Python
+      - name: Lint Code
+        run: |
+          npm run lint || npx eslint src/
 
-    - name: Test error handling
-      run: |
-        if python gitignore-gen.py NonExistentLanguage; then
-          echo "Expected failure but succeeded"
-          exit 1
-        else
-          echo "Correctly handled unknown language"
-        fi
+      - name: Verify TypeScript Types
+        run: |
+          npx tsc --noEmit
+
+      - name: Run Tests
+        run: |
+          npm run ${{ inputs.test-script }}
